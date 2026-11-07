@@ -1,101 +1,116 @@
 # PhoneCam
 
-Use your Android phone as a webcam for a Windows PC.
+Use your Android phone as a webcam (or share its screen) on a Windows PC, with live gesture effects.
 
-- `android/`  – Kotlin app (CameraX). Streams the camera as MJPEG over HTTP on port 8080.
-- `windows/`  – Python receiver. Shows a preview and can feed the OBS Virtual Camera, so Zoom / Meet / Teams see it as a webcam.
+- `android/`               Kotlin app. Streams the phone camera or screen over Wi-Fi/USB (MJPEG, port 8080).
+- `windows/`               Python receiver. Finds the phone, shows a preview, outputs a virtual webcam, draws effects.
+- `PhoneCam.bat`           One-click launcher (Wi-Fi). Sets everything up on first run.
+- `PhoneCam-USB.bat`       Same, over the USB cable (lowest delay).
+- `Install-Gestures.bat`   Optional: turns on hand-gesture detection for the effects.
 
-> **Status: untested first version.** It was written without the ability to compile the
-> Android app or run it on a phone. Expect to fix a few small things. Report any Android
-> Studio error or crash log and it can be corrected quickly.
+> **Status: early version.** The PC side is tested against a simulated phone. Version 0.2 of the Android app
+> (background streaming, zoom, rotate, screen share) could not be compiled or run where it was written,
+> so report any build error or crash and it will be fixed quickly.
 
-## 1. Build the Android app
+## Quick start
 
-1. Install [Android Studio](https://developer.android.com/studio).
-2. `File > Open` and choose the `android/` folder. Accept the prompt to let it set up Gradle and let it sync
-   (it downloads Gradle, the Android SDK platform 34 and the CameraX libraries on first run).
-3. On your phone: enable **Developer options** and **USB debugging**.
-4. Connect the phone by USB, pick it in the device dropdown, press **Run**.
-   (Or `Build > Build APK(s)` and install the APK manually.)
+1. **Phone:** install the PhoneCam APK, open it, allow the camera (and notifications), tap **Start**.
+2. **PC:** extract the whole zip, double-click **PhoneCam.bat**.
+   - First run: it installs what it needs (Python, libraries, optionally OBS). Click Yes on any
+     Windows permission prompts. This happens once.
+   - After that: it finds your phone on the Wi-Fi automatically and opens the preview.
+3. **Zoom / Meet / Teams:** choose **OBS Virtual Camera** as the camera.
 
-## 2. Set up the Windows receiver
+The phone and PC must be on the same Wi-Fi. If Windows SmartScreen says "Windows protected your PC",
+click **More info**, then **Run anyway**.
 
-1. Install [Python 3.10+](https://www.python.org/downloads/) (tick "Add to PATH").
-2. In a terminal:
+## App features
 
-   ```
-   cd windows
-   pip install -r requirements.txt
-   ```
-
-## 3. Run it
-
-Open the PhoneCam app, allow camera access, tap **Start**. The app shows the address to use.
-
-**Wi-Fi** (phone and PC on the same network):
-
-```
-python receiver.py 192.168.1.42
-```
-
-**USB** (steadier, lower lag; needs [adb platform-tools](https://developer.android.com/tools/releases/platform-tools) on PATH):
-
-```
-python receiver.py --usb
-```
-
-Press `q` or `Esc` in the preview window to quit.
-
-You can also check the stream from any browser: open `http://PHONE_IP:8080/`.
-
-## 4. Use it in Zoom / Meet / Teams
-
-1. Install [OBS Studio](https://obsproject.com/). Open it once, click **Start Virtual Camera**, then close OBS
-   (this registers the virtual camera driver).
-2. Run the receiver with `--virtualcam`:
-
-   ```
-   python receiver.py --usb --virtualcam --width 1280 --height 720
-   ```
-3. In Zoom/Meet/Teams, choose **OBS Virtual Camera** as your camera.
-
-## Receiver options
-
-| Option | What it does |
+| Control | What it does |
 | --- | --- |
-| `--usb` | Connect over USB using `adb forward` |
-| `--virtualcam` | Send video to OBS Virtual Camera |
-| `--width W --height H` | Output size (keeps aspect ratio, adds black bars) |
-| `--fps N` | Target frame rate (default 30) |
-| `--flip` | Mirror horizontally |
-| `--no-preview` | No window (only with `--virtualcam`) |
-| `--port N` | Phone port (default 8080) |
+| **Start / Stop** | Starts or stops streaming. |
+| **Source: Camera / Screen** | Stream the camera, or share the phone's screen (Android asks permission each time). Change it while stopped. |
+| **Rotate** | Turns the picture 90 degrees each tap (0, 90, 180, 270). Use it if the video is sideways or upside down. |
+| **Mirror** | Flips the picture left to right. |
+| **Back cam / Front cam, 540p / 720p / 1080p** | Camera and size. Lower size means less lag. |
+| **Zoom** | Pinch the preview, or use the slider (camera mode). |
 
-## App controls
+**Keeps running when minimised:** once streaming, you can switch to other apps or turn off the screen.
+A notification shows that PhoneCam is streaming; tap **Stop** in it, or in the app, to end it.
+The preview only shows while the app is open.
 
-- **Start / Stop** – starts or stops the stream server. The camera only does work while someone is connected.
-- **Back cam / Front cam** – switch cameras.
-- **540p / 720p / 1080p** – capture size. Lower it if the picture lags.
-- **Mirror** – flips the streamed image.
+**Screen sharing notes:** the shared picture keeps the orientation the phone had when you started
+(start sharing in the orientation you want). When the screen is still, the picture refreshes about once a
+second, which is normal. There is no audio.
+
+## Gesture effects
+
+Effects are drawn on the video on the PC, so everyone on your call sees them.
+
+**Try them straight away:** with the preview window selected, press keys **1 to 5**:
+1 hearts, 2 balloons, 3 confetti, 4 fireworks, 5 rain.
+
+**By hand gesture (optional install):** double-click **Install-Gestures.bat** once (downloads about
+200-400 MB; needs internet). Then hold a gesture in front of the camera for half a second:
+
+| Gesture | Effect |
+| --- | --- |
+| Thumbs up | Fireworks |
+| Peace sign (one hand) | Balloons |
+| Peace signs (both hands) | Confetti |
+| "I love you" sign (thumb, index and little finger out) | Hearts |
+| Thumbs down | Rain |
+
+Keep the hand clearly visible and not too small in the picture. Drop your hand and raise it again to repeat an
+effect. Use `--no-gestures` to switch detection off, or `--no-effects` to switch all effects off.
+
+## Less delay: USB mode
+
+1. On the phone: Settings > About phone > tap **Build number** 7 times, then Settings > Developer options >
+   turn on **USB debugging**.
+2. Plug the phone into the PC with a data cable and tap **Allow** on the phone when asked.
+3. Open the PhoneCam app, tap **Start**, then double-click **PhoneCam-USB.bat** on the PC.
+
+The first run downloads a small Google tool (adb, about 7 MB) by itself.
+
+## Reducing lag on Wi-Fi
+
+- Use a 5 GHz Wi-Fi network, and keep the phone and PC close to the router.
+- Lower the resolution in the app (540p or 720p).
+- Close other heavy downloads or streams on the same network.
 
 ## Troubleshooting
 
-- **Receiver says "retrying" / nothing appears**: check the phone is streaming, same Wi-Fi, and that your
-  Windows firewall/router isn't blocking port 8080 (USB mode avoids this).
-- **Laggy video**: use USB, lower to 540p/720p, or move closer to the router / use 5 GHz Wi-Fi.
-- **`adb forward failed`**: unlock the phone, accept the "Allow USB debugging" prompt, run `adb devices`.
-- **Virtual camera won't start**: OBS must be installed and its virtual camera started once (step 4.1).
-- **Phone gets warm**: lower resolution; keep it charging.
+- **"Looking for your phone..." forever:** the app must be streaming (tap **Start**) on the same Wi-Fi.
+  Some routers block devices from seeing each other (often guest Wi-Fi). Use USB mode, or the main Wi-Fi.
+- **Camera not listed in Zoom/Meet:** OBS must be installed and its virtual camera registered. Open OBS,
+  click **Start Virtual Camera** once, close OBS, run PhoneCam.bat again.
+- **Gestures do nothing:** run Install-Gestures.bat and check the messages in the black window start with
+  `[gestures] on`. Light the room well and show the hand clearly. Keys 1-5 always work.
+- **Streaming stops when the app is minimised (some brands):** in Android settings, set PhoneCam's battery use
+  to "Unrestricted" / "Don't optimise".
+- **Phone gets warm:** lower the resolution and keep it charging.
 
-## Known limitations (version 1)
+## Options (advanced)
 
-- **No audio.** Use your PC mic or a headset.
-- The app must stay open on screen (the screen is kept awake). Running it in the background needs a foreground service, which is a planned next step.
-- MJPEG uses more bandwidth than H.264 and is limited by the phone's JPEG encoding speed; 720p30 should be fine on most phones.
-- Landscape only.
-- No autofocus/exposure/zoom controls or auto-reconnect UI on the phone yet (the receiver does auto-reconnect).
+Run from a terminal in the PhoneCam folder, for example `PhoneCam.bat --preview-only`.
 
-## Next steps
+| Option | What it does |
+| --- | --- |
+| `192.168.1.42` | Use this phone IP instead of searching |
+| `--usb` | Connect over USB using `adb forward` |
+| `--preview-only` | Preview window only, no virtual camera |
+| `--width W --height H` | Output size (default 1280x720 for the virtual camera) |
+| `--fps N` | Frame rate (default 30) |
+| `--flip` | Mirror horizontally on the PC |
+| `--no-preview` | No window |
+| `--no-effects`, `--no-gestures` | Turn effects, or only gesture detection, off |
+| `--port N` | Phone port (default 8080) |
 
-Foreground service with a persistent notification, tap-to-focus and zoom, torch, H.264/WebRTC for lower latency,
-audio, and a native Windows virtual camera that doesn't need OBS.
+## Known limitations
+
+- No audio. Use your PC mic or a headset.
+- MJPEG uses more bandwidth than H.264, so latency is higher than the big webcam apps.
+- Gesture detection is untested on real hands so far; thresholds may need tuning.
+- Rotated (portrait) video is shown with black bars in a 16:9 virtual camera.
+- Windows only for the receiver.

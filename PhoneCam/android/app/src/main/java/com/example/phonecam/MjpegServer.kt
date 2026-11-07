@@ -87,6 +87,9 @@ class MjpegServer(
     private fun handle(socket: Socket) {
         try {
             socket.tcpNoDelay = true
+            // Small send buffer: if the network is slow, writes block and we then send the
+            // NEWEST frame instead of letting several old frames queue up (that queue is lag).
+            runCatching { socket.sendBufferSize = 64 * 1024 }
             socket.soTimeout = 10_000
             val reader = socket.getInputStream().bufferedReader(Charsets.ISO_8859_1)
             val requestLine = reader.readLine() ?: return
@@ -143,7 +146,9 @@ class MjpegServer(
             while (running) {
                 var frame: ByteArray? = null
                 lock.withLock {
-                    while (running && frameId == lastId) {
+                    // Wait up to 1 s for a new frame. If none comes (e.g. a still screen being
+                    // shared) the last frame is sent again, which keeps the connection alive.
+                    if (running && frameId == lastId) {
                         newFrame.await(1, TimeUnit.SECONDS)
                     }
                     frame = latest

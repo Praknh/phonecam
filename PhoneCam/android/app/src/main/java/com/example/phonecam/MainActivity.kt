@@ -1,72 +1,91 @@
 package com.example.phonecam
 
 import android.Manifest
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Matrix
+import android.graphics.BitmapFactory
+import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
-import android.util.Log
-import android.util.Size
+import android.os.IBinder
+import android.view.ScaleGestureDetector
+import android.view.View
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.ImageView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
-import androidx.camera.core.Preview
-import androidx.camera.core.resolutionselector.AspectRatioStrategy
-import androidx.camera.core.resolutionselector.ResolutionSelector
-import androidx.camera.core.resolutionselector.ResolutionStrategy
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
-import java.io.ByteArrayOutputStream
-import java.net.Inet4Address
-import java.net.NetworkInterface
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * The screen you see. Streaming itself runs in [CameraStreamService], so it keeps going
+ * when this app is minimised; this activity binds to the service for the preview and controls.
+ */
 class MainActivity : AppCompatActivity() {
 
-    private data class Res(val label: String, val size: Size)
-
-    private val resolutions = listOf(
-        Res("540p", Size(960, 540)),
-        Res("720p", Size(1280, 720)),
-        Res("1080p", Size(1920, 1080)),
-    )
-
-    private lateinit var previewView: PreviewView
+    private lateinit var previewView: ImageView
     private lateinit var statusText: TextView
     private lateinit var startButton: Button
+    private lateinit var sourceButton: Button
+    private lateinit var rotateButton: Button
+    private lateinit var mirrorButton: Button
     private lateinit var switchButton: Button
     private lateinit var resButton: Button
-    private lateinit var mirrorButton: Button
+    private lateinit var zoomLabel: TextView
+    private lateinit var zoomBar: SeekBar
+    private lateinit var cameraControls: View
+    private lateinit var scaleDetector: ScaleGestureDetector
 
-    private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    private var cameraProvider: ProcessCameraProvider? = null
-    private var server: MjpegServer? = null
+    private var service: CameraStreamService? = null
+    private var bound = false
+    private var selectedScreen = false
+    private var updatingZoomBar = false
 
-    private var useFront = false
-    private var resIndex = 1
+    private val previewExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val previewBusy = AtomicBoolean(false)
 
-    @Volatile
-    private var mirror = false
+    private val connection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            val svc = (binder as CameraStreamService.LocalBinder).service
+            service = svc
+            svc.stateListener = { refreshUi() }
+            svc.previewListener = { jpeg -> showPreview(jpeg) }
+            refreshUi()
+        }
 
-    @Volatile
-    private var streaming = false
-
-    private var clientCount = 0
+        override fun onServiceDisconnected(name: ComponentName) {
+            service = null
+        }
+    }
 
     private val permissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) {
-                startCamera()
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+            if (results[Manifest.permission.CAMERA] == false) {
+                Toast.makeText(this, "Camera permission is needed to stream the camera", Toast.LENGTH_LONG).show()
+            }
+        }
+
+    private val projectionLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val data = result.data
+            if (result.resultCode == RESULT_OK && data != null) {
+                val intent = Intent(this, CameraStreamService::class.java)
+                    .setAction(CameraStreamService.ACTION_START_SCREEN)
+                    .putExtra(CameraStreamService.EXTRA_RESULT_CODE, result.resultCode)
+                    .putExtra(CameraStreamService.EXTRA_RESULT_DATA, data)
+                ContextCompat.startForegroundService(this, intent)
             } else {
-                statusText.text = "Camera permission is required."
+                Toast.makeText(this, "Screen sharing was not allowed", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -78,204 +97,191 @@ class MainActivity : AppCompatActivity() {
         previewView = findViewById(R.id.previewView)
         statusText = findViewById(R.id.statusText)
         startButton = findViewById(R.id.startButton)
+        sourceButton = findViewById(R.id.sourceButton)
+        rotateButton = findViewById(R.id.rotateButton)
+        mirrorButton = findViewById(R.id.mirrorButton)
         switchButton = findViewById(R.id.switchButton)
         resButton = findViewById(R.id.resButton)
-        mirrorButton = findViewById(R.id.mirrorButton)
+        zoomLabel = findViewById(R.id.zoomLabel)
+        zoomBar = findViewById(R.id.zoomBar)
+        cameraControls = findViewById(R.id.cameraControls)
 
-        startButton.setOnClickListener { if (streaming) stopStreaming() else startStreaming() }
-        switchButton.setOnClickListener {
-            useFront = !useFront
-            switchButton.text = if (useFront) "Front cam" else "Back cam"
-            bindCamera()
+        startButton.setOnClickListener {
+            val svc = service
+            if (svc != null && svc.streaming) svc.requestStop() else beginStream()
         }
-        resButton.setOnClickListener {
-            resIndex = (resIndex + 1) % resolutions.size
-            resButton.text = resolutions[resIndex].label
-            bindCamera()
-        }
-        mirrorButton.setOnClickListener {
-            mirror = !mirror
-            mirrorButton.text = if (mirror) "Mirror: on" else "Mirror: off"
-        }
-
-        resButton.text = resolutions[resIndex].label
-        updateStatus()
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            startCamera()
-        } else {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        server?.stop()
-        server = null
-        analysisExecutor.shutdown()
-    }
-
-    // ---------------------------------------------------------------- camera
-
-    private fun startCamera() {
-        val future = ProcessCameraProvider.getInstance(this)
-        future.addListener({
-            cameraProvider = future.get()
-            bindCamera()
-        }, ContextCompat.getMainExecutor(this))
-    }
-
-    private fun bindCamera() {
-        val provider = cameraProvider ?: return
-        val selector = if (useFront) {
-            CameraSelector.DEFAULT_FRONT_CAMERA
-        } else {
-            CameraSelector.DEFAULT_BACK_CAMERA
-        }
-        if (!provider.hasCamera(selector)) {
-            Toast.makeText(this, "That camera is not available", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val analysisSelector = ResolutionSelector.Builder()
-            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
-            .setResolutionStrategy(
-                ResolutionStrategy(
-                    resolutions[resIndex].size,
-                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
-                )
-            )
-            .build()
-
-        val previewSelector = ResolutionSelector.Builder()
-            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
-            .build()
-
-        val preview = Preview.Builder()
-            .setResolutionSelector(previewSelector)
-            .build()
-            .also { it.setSurfaceProvider(previewView.surfaceProvider) }
-
-        val analysis = ImageAnalysis.Builder()
-            .setResolutionSelector(analysisSelector)
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-            .build()
-            .also { it.setAnalyzer(analysisExecutor) { image -> handleFrame(image) } }
-
-        try {
-            provider.unbindAll()
-            provider.bindToLifecycle(this, selector, preview, analysis)
-        } catch (e: Exception) {
-            Log.e(TAG, "Camera bind failed", e)
-            Toast.makeText(this, "Camera error: ${e.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    /** Runs on the analysis thread for every camera frame. */
-    private fun handleFrame(image: ImageProxy) {
-        try {
-            val srv = server
-            // Skip all the work when nobody is watching: saves battery and heat.
-            if (srv == null || !srv.hasClients()) return
-
-            val source = image.toBitmap()
-            val matrix = Matrix()
-            val rotation = image.imageInfo.rotationDegrees
-            if (rotation != 0) matrix.postRotate(rotation.toFloat())
-            if (mirror) matrix.postScale(-1f, 1f)
-
-            val oriented = if (matrix.isIdentity) {
-                source
+        sourceButton.setOnClickListener {
+            if (service?.streaming == true) {
+                Toast.makeText(this, "Stop streaming first to change the source", Toast.LENGTH_SHORT).show()
             } else {
-                Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+                selectedScreen = !selectedScreen
+                refreshUi()
+            }
+        }
+        rotateButton.setOnClickListener { service?.rotateVideo() }
+        mirrorButton.setOnClickListener { service?.toggleMirror() }
+        switchButton.setOnClickListener { service?.switchCamera() }
+        resButton.setOnClickListener { service?.cycleResolution() }
+
+        zoomBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser && !updatingZoomBar) {
+                    service?.setZoomFraction(progress / 100f)
+                    updateZoomLabel()
+                }
             }
 
-            val buffer = ByteArrayOutputStream(64 * 1024)
-            oriented.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, buffer)
-            srv.publish(buffer.toByteArray())
+            override fun onStartTrackingTouch(bar: SeekBar) {}
+            override fun onStopTrackingTouch(bar: SeekBar) {}
+        })
 
-            if (oriented !== source) oriented.recycle()
-            source.recycle()
-        } catch (e: Exception) {
-            Log.e(TAG, "Frame error", e)
-        } finally {
-            image.close()
-        }
-    }
-
-    // ------------------------------------------------------------- streaming
-
-    private fun startStreaming() {
-        val srv = MjpegServer(
-            PORT,
-            onClientsChanged = { count ->
-                runOnUiThread {
-                    clientCount = count
-                    updateStatus()
-                }
-            },
-            onError = { message ->
-                runOnUiThread {
-                    stopStreaming()
-                    statusText.text = "Server error: $message"
+        // Pinch the preview to zoom.
+        scaleDetector = ScaleGestureDetector(
+            this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    service?.zoomBy(detector.scaleFactor)
+                    syncZoomUi()
+                    return true
                 }
             },
         )
-        srv.start()
-        server = srv
-        streaming = true
-        clientCount = 0
-        startButton.text = "Stop"
-        updateStatus()
+        previewView.setOnTouchListener { _, event ->
+            scaleDetector.onTouchEvent(event)
+            true
+        }
+
+        requestStartupPermissions()
+        refreshUi()
     }
 
-    private fun stopStreaming() {
-        server?.stop()
-        server = null
-        streaming = false
-        clientCount = 0
-        startButton.text = "Start"
-        updateStatus()
+    override fun onStart() {
+        super.onStart()
+        bound = bindService(
+            Intent(this, CameraStreamService::class.java),
+            connection,
+            Context.BIND_AUTO_CREATE,
+        )
     }
 
-    private fun updateStatus() {
-        if (!streaming) {
-            statusText.text = "Not streaming. Tap Start."
+    override fun onStop() {
+        service?.stateListener = null
+        service?.previewListener = null
+        service = null
+        if (bound) {
+            unbindService(connection)
+            bound = false
+        }
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        previewExecutor.shutdownNow()
+        super.onDestroy()
+    }
+
+    // --------------------------------------------------------------- actions
+
+    private fun requestStartupPermissions() {
+        val wanted = mutableListOf<String>()
+        if (!hasCameraPermission()) wanted.add(Manifest.permission.CAMERA)
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            wanted.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (wanted.isNotEmpty()) permissionLauncher.launch(wanted.toTypedArray())
+    }
+
+    private fun hasCameraPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun beginStream() {
+        if (selectedScreen) {
+            val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            projectionLauncher.launch(manager.createScreenCaptureIntent())
             return
         }
-        val ips = localIpv4Addresses()
-        val wifi = if (ips.isEmpty()) {
-            "No Wi-Fi address found"
-        } else {
-            ips.joinToString("  |  ") { "http://$it:$PORT/video" }
+        if (!hasCameraPermission()) {
+            permissionLauncher.launch(arrayOf(Manifest.permission.CAMERA))
+            return
         }
-        statusText.text = "Streaming  (viewers: $clientCount)\nWi-Fi: $wifi\n" +
-            "USB: run  adb forward tcp:$PORT tcp:$PORT"
+        @Suppress("DEPRECATION")
+        val rotation = windowManager.defaultDisplay.rotation
+        val intent = Intent(this, CameraStreamService::class.java)
+            .setAction(CameraStreamService.ACTION_START_CAMERA)
+            .putExtra(CameraStreamService.EXTRA_ROTATION, rotation)
+        ContextCompat.startForegroundService(this, intent)
     }
 
-    private fun localIpv4Addresses(): List<String> {
-        val result = mutableListOf<String>()
+    /** Decodes a streamed frame for the on-screen preview. Called on a background thread. */
+    private fun showPreview(jpeg: ByteArray) {
+        if (!previewBusy.compareAndSet(false, true)) return // still busy with the last one
         try {
-            for (nif in NetworkInterface.getNetworkInterfaces()) {
-                if (!nif.isUp || nif.isLoopback) continue
-                for (addr in nif.inetAddresses) {
-                    if (addr is Inet4Address && !addr.isLoopbackAddress) {
-                        addr.hostAddress?.let { result.add(it) }
-                    }
+            previewExecutor.execute {
+                try {
+                    val options = BitmapFactory.Options().apply { inSampleSize = 2 }
+                    val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, options)
+                    if (bitmap != null) runOnUiThread { previewView.setImageBitmap(bitmap) }
+                } finally {
+                    previewBusy.set(false)
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Could not list addresses", e)
+            previewBusy.set(false) // executor already shut down
         }
-        return result
     }
 
-    companion object {
-        private const val TAG = "PhoneCam"
-        private const val PORT = 8080
-        private const val JPEG_QUALITY = 80
+    // -------------------------------------------------------------------- UI
+
+    private fun refreshUi() {
+        val svc = service
+        val streaming = svc?.streaming == true
+        val screenMode = if (svc != null && streaming) {
+            svc.source == CameraStreamService.Source.SCREEN
+        } else {
+            selectedScreen
+        }
+
+        startButton.text = if (streaming) "Stop" else "Start"
+        sourceButton.text = if (screenMode) "Source: Screen" else "Source: Camera"
+        rotateButton.text = "Rotate: ${svc?.extraRotation ?: 0}°"
+        mirrorButton.text = if (svc?.mirror == true) "Mirror: on" else "Mirror: off"
+        switchButton.text = if (svc?.useFront == true) "Front cam" else "Back cam"
+        resButton.text = svc?.resolutionLabel() ?: "720p"
+        cameraControls.visibility = if (screenMode) View.GONE else View.VISIBLE
+        syncZoomUi()
+
+        if (!streaming) previewView.setImageDrawable(null)
+
+        statusText.text = when {
+            !streaming -> {
+                val error = svc?.lastError
+                if (error != null) "$error\nTap Start to try again." else "Not streaming. Tap Start."
+            }
+            else -> {
+                val what = if (screenMode) "screen" else "camera"
+                val urls = svc?.streamUrls().orEmpty()
+                val wifi = if (urls.isEmpty()) "No Wi-Fi address found" else urls.joinToString("  |  ")
+                "Streaming your $what  (viewers: ${svc?.clientCount ?: 0}). " +
+                    "Keeps running if you minimise the app.\n" +
+                    "Wi-Fi: $wifi\nUSB: adb forward tcp:${CameraStreamService.PORT} tcp:${CameraStreamService.PORT}"
+            }
+        }
+    }
+
+    private fun syncZoomUi() {
+        val svc = service ?: return
+        updatingZoomBar = true
+        zoomBar.progress = (svc.zoomFraction() * 100).toInt()
+        updatingZoomBar = false
+        updateZoomLabel()
+    }
+
+    private fun updateZoomLabel() {
+        val ratio = service?.zoomRatio ?: 1f
+        zoomLabel.text = String.format(Locale.US, "Zoom %.1fx", ratio)
     }
 }
