@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="surface_dark">#FF121212</color>
+    <color name="surface_card">#FF1E1E1E</color>
+    <color name="primary">#FF2979FF</color>
+    <color name="primary_variant">#FF1565C0</color>
+    <color name="accent_green">#FF00E676</color>
+    <color name="accent_red">#FFFF5252</color>
+</resources>

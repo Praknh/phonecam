@@ -1,3 +1,12 @@
 @echo off
-rem USB mode: lower delay than Wi-Fi. Needs USB debugging turned on in the phone's Developer options.
-call "%~dp0PhoneCam.bat" --usb %*
+title PhoneCam HD (USB Mode)
+cd /d "%~dp0\windows"
+
+python -c "import av, pyvirtualcam, cv2" 2>nul
+if %errorlevel% neq 0 (
+    echo [setup] Installing required dependencies...
+    pip install -r requirements.txt
+)
+
+python receiver.py --usb %*
+pause
